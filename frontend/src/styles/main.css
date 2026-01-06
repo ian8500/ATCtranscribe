@@ -1,0 +1,27 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  font-family: "Inter", system-ui, sans-serif;
+}
+
+body {
+  @apply bg-midnight text-white;
+}
+
+.card {
+  @apply rounded-2xl bg-slate/80 p-6 shadow-lg shadow-black/30;
+}
+
+.btn {
+  @apply rounded-xl px-4 py-2 text-sm font-semibold transition;
+}
+
+.btn-primary {
+  @apply bg-accent text-white hover:bg-accent/90;
+}
+
+.btn-secondary {
+  @apply bg-white/10 text-white hover:bg-white/20;
+}
