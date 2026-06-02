@@ -79,6 +79,21 @@ def test_rejects_invalid_wav_signature(client):
     assert upload_resp.status_code == 400
 
 
+def test_large_upload_limit_message_is_configurable(client, monkeypatch):
+    login(client)
+    create_resp = client.post("/api/transcripts", json={"name": "Too Large", "description": "desc"})
+    transcript_id = create_resp.json()["id"]
+
+    monkeypatch.setattr("app.audio.settings.max_upload_mb", 0)
+    upload_resp = client.post(
+        f"/api/transcripts/{transcript_id}/upload-wav",
+        files={"file": ("large.wav", minimal_wav(), "audio/wav")},
+    )
+
+    assert upload_resp.status_code == 400
+    assert "Current limit is 0 MB" in upload_resp.json()["detail"]
+
+
 def test_docx_export_download_removes_temp_file(client):
     login(client)
     create_resp = client.post("/api/transcripts", json={"name": "Export Test", "description": "desc"})

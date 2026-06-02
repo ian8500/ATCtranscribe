@@ -73,7 +73,7 @@ def save_wav_file(transcript_id: int, upload: UploadFile) -> str:
             if total > size_limit:
                 out.close()
                 os.remove(target)
-                raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="File too large")
+                raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"File too large. Current limit is {settings.max_upload_mb} MB")
             out.write(chunk)
     return target
 

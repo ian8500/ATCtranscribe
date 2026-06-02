@@ -28,7 +28,7 @@ class Settings(BaseModel):
     smtp_from: str = os.getenv("SMTP_FROM", "noreply@atc.local")
     dev_email_console: bool = os.getenv("DEV_EMAIL_CONSOLE", "true").lower() == "true"
     upload_dir: str = os.getenv("UPLOAD_DIR", "./uploads")
-    max_upload_mb: int = int(os.getenv("MAX_UPLOAD_MB", "200"))
+    max_upload_mb: int = int(os.getenv("MAX_UPLOAD_MB", "2048"))
     rate_limit_window_seconds: int = int(os.getenv("RATE_LIMIT_WINDOW_SECONDS", "60"))
     rate_limit_max_attempts: int = int(os.getenv("RATE_LIMIT_MAX_ATTEMPTS", "10"))
     whisper_model: str = os.getenv("WHISPER_MODEL", "small")
@@ -37,15 +37,17 @@ class Settings(BaseModel):
     whisper_local_only: bool = os.getenv("WHISPER_LOCAL_ONLY", "false").lower() == "true"
     whisper_beam_size: int = int(os.getenv("WHISPER_BEAM_SIZE", "5"))
     whisper_temperature: float = float(os.getenv("WHISPER_TEMPERATURE", "0"))
-    whisper_no_speech_threshold: float = float(os.getenv("WHISPER_NO_SPEECH_THRESHOLD", "0.45"))
-    whisper_log_prob_threshold: float = float(os.getenv("WHISPER_LOG_PROB_THRESHOLD", "-0.8"))
+    whisper_no_speech_threshold: float = float(os.getenv("WHISPER_NO_SPEECH_THRESHOLD", "0.75"))
+    whisper_log_prob_threshold: float = float(os.getenv("WHISPER_LOG_PROB_THRESHOLD", "-1.2"))
     whisper_compression_ratio_threshold: float = float(os.getenv("WHISPER_COMPRESSION_RATIO_THRESHOLD", "2.4"))
     whisper_repetition_penalty: float = float(os.getenv("WHISPER_REPETITION_PENALTY", "1.15"))
     whisper_no_repeat_ngram_size: int = int(os.getenv("WHISPER_NO_REPEAT_NGRAM_SIZE", "3"))
     whisper_vad_min_silence_ms: int = int(os.getenv("WHISPER_VAD_MIN_SILENCE_MS", "500"))
     whisper_vad_speech_pad_ms: int = int(os.getenv("WHISPER_VAD_SPEECH_PAD_MS", "150"))
-    whisper_hallucination_silence_threshold: float = float(os.getenv("WHISPER_HALLUCINATION_SILENCE_THRESHOLD", "1.0"))
+    whisper_hallucination_silence_threshold: float = float(os.getenv("WHISPER_HALLUCINATION_SILENCE_THRESHOLD", "2.0"))
+    whisper_prompt_enabled: bool = os.getenv("WHISPER_PROMPT_ENABLED", "false").lower() == "true"
     whisper_hotwords_enabled: bool = os.getenv("WHISPER_HOTWORDS_ENABLED", "false").lower() == "true"
+    whisper_word_min_probability: float = float(os.getenv("WHISPER_WORD_MIN_PROBABILITY", "0.05"))
     whisper_ffmpeg_denoise: bool = os.getenv("WHISPER_FFMPEG_DENOISE", "false").lower() == "true"
 
     @property

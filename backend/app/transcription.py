@@ -22,7 +22,7 @@ settings = get_settings()
 
 NO_SPEECH_THRESHOLD = settings.whisper_no_speech_threshold
 AVG_LOGPROB_THRESHOLD = settings.whisper_log_prob_threshold
-EXTREME_AVG_LOGPROB_THRESHOLD = -1.8
+EXTREME_AVG_LOGPROB_THRESHOLD = -2.4
 COMPRESSION_RATIO_THRESHOLD = settings.whisper_compression_ratio_threshold
 MAX_LINE_CHARS = 220
 HALLUCINATION_PHRASES = {
@@ -241,6 +241,11 @@ def _metadata_flags(seg: Any) -> dict[str, Any]:
         flags["low_confidence"] = True
     if no_speech_prob is not None and no_speech_prob > NO_SPEECH_THRESHOLD:
         flags["possible_silence"] = True
+    mean_word_probability = mean_word_probability_for_segment(seg)
+    if mean_word_probability is not None:
+        flags["mean_word_probability"] = mean_word_probability
+        if mean_word_probability < settings.whisper_word_min_probability:
+            flags["low_confidence"] = True
     return flags
 
 
@@ -254,6 +259,25 @@ def _is_repetitive_hallucination(text: str) -> bool:
         return False
     unique_ratio = len(set(words)) / len(words)
     return unique_ratio < 0.35
+
+
+def word_probabilities_for_segment(seg: Any) -> list[float]:
+    words = getattr(seg, "words", None)
+    if not words:
+        return []
+    probabilities: list[float] = []
+    for word in words:
+        probability = getattr(word, "probability", None)
+        if probability is not None:
+            probabilities.append(float(probability))
+    return probabilities
+
+
+def mean_word_probability_for_segment(seg: Any) -> float | None:
+    probabilities = word_probabilities_for_segment(seg)
+    if not probabilities:
+        return None
+    return sum(probabilities) / len(probabilities)
 
 
 def should_drop_segment(seg: Any) -> bool:
@@ -270,7 +294,7 @@ def should_drop_segment(seg: Any) -> bool:
     if _is_repetitive_hallucination(raw_text):
         return True
     if no_speech_prob is not None and no_speech_prob >= NO_SPEECH_THRESHOLD:
-        if avg_logprob is None or avg_logprob < -0.25:
+        if avg_logprob is None or avg_logprob < -0.60:
             return True
     if avg_logprob is not None and avg_logprob < EXTREME_AVG_LOGPROB_THRESHOLD:
         return True
@@ -287,8 +311,8 @@ def _word_flags(seg: Any, offset_seconds: int) -> dict[str, list[dict[str, Any]]
         "words": [
             {
                 "word": word.word,
-                "start_hms": seconds_to_hms(offset_seconds + int(word.start)),
-                "end_hms": seconds_to_hms(offset_seconds + int(word.end)),
+                "start_hms": seconds_to_hms(offset_seconds + int(getattr(word, "start", getattr(seg, "start", 0)))),
+                "end_hms": seconds_to_hms(offset_seconds + int(getattr(word, "end", getattr(seg, "end", getattr(seg, "start", 0))))),
                 "probability": getattr(word, "probability", None),
             }
             for word in words[:120]
@@ -357,7 +381,7 @@ def transcribe_audio(wav_path: str, start_time: str, exclude_list: list[str], vo
         preprocessing_path = preprocess_audio(wav_path, transcript_id)
 
     try:
-        initial_prompt = build_initial_prompt(vocabulary)
+        initial_prompt = build_initial_prompt(vocabulary) if settings.whisper_prompt_enabled else None
         hotwords = None
         if settings.whisper_hotwords_enabled:
             hotwords = " ".join([*COMMON_ATC_TERMS, *LOCAL_ATC_VOCABULARY, *vocabulary[:80]])

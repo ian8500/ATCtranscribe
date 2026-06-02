@@ -10,6 +10,7 @@ from app.transcription import (
     seconds_to_hms,
     segment_to_lines,
     should_drop_segment,
+    mean_word_probability_for_segment,
 )
 
 
@@ -75,9 +76,32 @@ def test_probable_silence_segment_is_dropped():
         start=0,
         text="cleared to land",
         no_speech_prob=0.8,
-        avg_logprob=-0.4,
+        avg_logprob=-0.9,
         compression_ratio=1.0,
         words=[],
     )
 
     assert should_drop_segment(segment) is True
+
+
+def test_low_word_probability_segment_is_kept_and_flagged():
+    segment = SimpleNamespace(
+        start=0,
+        text="Speedbird 123 cleared to land",
+        no_speech_prob=0.1,
+        avg_logprob=-0.2,
+        compression_ratio=1.0,
+        words=[
+            SimpleNamespace(word="Speedbird", probability=0.02),
+            SimpleNamespace(word="123", probability=0.04),
+            SimpleNamespace(word="cleared", probability=0.03),
+            SimpleNamespace(word="to", probability=0.02),
+            SimpleNamespace(word="land", probability=0.04),
+        ],
+    )
+
+    assert mean_word_probability_for_segment(segment) < 0.05
+    assert should_drop_segment(segment) is False
+    lines = segment_to_lines(segment, hms_to_seconds("09:00:00"), [])
+    assert lines[0]["text"] == "Speedbird 123 cleared to land"
+    assert lines[0]["flags_json"]["low_confidence"] is True

@@ -554,7 +554,7 @@ export default function TranscriptEditor() {
           <form className="card space-y-3" onSubmit={transcribe}>
             <h3 className="text-lg font-semibold">Transcribe</h3>
             <div className="rounded-md border border-white/10 bg-black/20 px-3 py-2 text-xs text-white/55">
-              Model: backend Whisper config | Audio: mono 16kHz preprocessing when ffmpeg is available
+              Accuracy mode: conservative decoding, no prompt/hotwords by default, mono 16kHz ATC-band preprocessing when ffmpeg is available
             </div>
             <label className="text-xs uppercase text-white/50">Recording start time</label>
             <input

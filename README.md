@@ -124,12 +124,12 @@ Copy `.env.example` and set deployment-specific values. Key backend variables:
 - `SECURE_COOKIES` set `true` when served over HTTPS.
 - `CORS_ORIGINS` comma-separated allowed frontend origins.
 - `UPLOAD_DIR` default `./uploads`.
-- `MAX_UPLOAD_MB` default `200`.
-- `WHISPER_MODEL` local accuracy preset `medium`; use `small` for speed or `large-v3` for maximum accuracy.
+- `MAX_UPLOAD_MB` default `2048` for long WAV recordings. Increase only if your local disk has enough space.
+- `WHISPER_MODEL` local accuracy preset `large-v3`; use `small` or `medium` only when speed matters more than accuracy.
 - `WHISPER_DEVICE` default `cpu`.
 - `WHISPER_COMPUTE_TYPE` default `int8`.
 - `WHISPER_LOCAL_ONLY` set `true` after model files are cached for offline-only use.
-- `WHISPER_TEMPERATURE=0`, `WHISPER_HOTWORDS_ENABLED=false`, and the stricter no-speech/log-prob thresholds reduce ATC hallucinations.
+- `WHISPER_TEMPERATURE=0`, `WHISPER_PROMPT_ENABLED=false`, `WHISPER_HOTWORDS_ENABLED=false`, word-confidence flagging, and balanced no-speech/log-prob thresholds reduce ATC hallucinations without blanking degraded speech.
 - `WHISPER_FFMPEG_DENOISE=false` keeps denoise off by default; enable only if it improves your radio recordings.
 - `DEV_EMAIL_CONSOLE` default `true`; set SMTP values for email delivery.
 - `RATE_LIMIT_WINDOW_SECONDS` and `RATE_LIMIT_MAX_ATTEMPTS` configure the local in-memory limiter.
@@ -211,10 +211,10 @@ WHISPER_MODEL=small WHISPER_DEVICE=cpu WHISPER_COMPUTE_TYPE=int8 ./scripts/run_b
 Accuracy-oriented local setting:
 
 ```bash
-WHISPER_MODEL=medium WHISPER_DEVICE=cpu WHISPER_COMPUTE_TYPE=int8 ./scripts/run_backend.sh
+WHISPER_MODEL=large-v3 WHISPER_DEVICE=cpu WHISPER_COMPUTE_TYPE=int8 ./scripts/run_backend.sh
 ```
 
-Anti-hallucination mode is the default. It uses deterministic decoding, stricter silence filtering, and leaves uncertain spoken text flagged rather than inventing lines.
+Anti-hallucination mode is the default. It uses deterministic decoding, disables the ATC prompt/hotwords unless explicitly enabled, drops only strong silence/repetition/hallucination patterns, and leaves uncertain spoken text flagged rather than blanking it.
 
 After the model is cached, offline mode can be enabled in `.env`:
 
