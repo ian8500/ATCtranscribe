@@ -30,12 +30,16 @@ def test_transcript_crud_and_completion(client):
         files={"file": ("test.wav", wav_bytes, "audio/wav")},
     )
     assert upload_resp.status_code == 200
+    audio_resp = client.get(f"/api/transcripts/{transcript_id}/audio")
+    assert audio_resp.status_code == 200
+    assert audio_resp.headers["content-type"].startswith("audio/wav")
 
     path = os.path.join("./uploads", str(transcript_id), "audio.wav")
     assert os.path.exists(path)
 
     complete_resp = client.post(f"/api/transcripts/{transcript_id}/mark-complete")
     assert complete_resp.status_code == 200
+    assert client.get(f"/api/transcripts/{transcript_id}/audio").status_code == 404
     assert not os.path.exists(path)
 
     db = SessionLocal()

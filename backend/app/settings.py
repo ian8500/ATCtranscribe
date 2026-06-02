@@ -35,6 +35,18 @@ class Settings(BaseModel):
     whisper_device: str = os.getenv("WHISPER_DEVICE", "cpu")
     whisper_compute_type: str = os.getenv("WHISPER_COMPUTE_TYPE", "int8")
     whisper_local_only: bool = os.getenv("WHISPER_LOCAL_ONLY", "false").lower() == "true"
+    whisper_beam_size: int = int(os.getenv("WHISPER_BEAM_SIZE", "5"))
+    whisper_temperature: float = float(os.getenv("WHISPER_TEMPERATURE", "0"))
+    whisper_no_speech_threshold: float = float(os.getenv("WHISPER_NO_SPEECH_THRESHOLD", "0.45"))
+    whisper_log_prob_threshold: float = float(os.getenv("WHISPER_LOG_PROB_THRESHOLD", "-0.8"))
+    whisper_compression_ratio_threshold: float = float(os.getenv("WHISPER_COMPRESSION_RATIO_THRESHOLD", "2.4"))
+    whisper_repetition_penalty: float = float(os.getenv("WHISPER_REPETITION_PENALTY", "1.15"))
+    whisper_no_repeat_ngram_size: int = int(os.getenv("WHISPER_NO_REPEAT_NGRAM_SIZE", "3"))
+    whisper_vad_min_silence_ms: int = int(os.getenv("WHISPER_VAD_MIN_SILENCE_MS", "500"))
+    whisper_vad_speech_pad_ms: int = int(os.getenv("WHISPER_VAD_SPEECH_PAD_MS", "150"))
+    whisper_hallucination_silence_threshold: float = float(os.getenv("WHISPER_HALLUCINATION_SILENCE_THRESHOLD", "1.0"))
+    whisper_hotwords_enabled: bool = os.getenv("WHISPER_HOTWORDS_ENABLED", "false").lower() == "true"
+    whisper_ffmpeg_denoise: bool = os.getenv("WHISPER_FFMPEG_DENOISE", "false").lower() == "true"
 
     @property
     def is_production(self) -> bool:

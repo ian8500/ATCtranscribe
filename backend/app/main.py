@@ -394,6 +394,20 @@ def upload_wav(transcript_id: int, file: UploadFile = File(...), user: User = De
     return {"message": "uploaded"}
 
 
+@app.get("/api/transcripts/{transcript_id}/audio")
+def get_transcript_audio(transcript_id: int, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    transcript = get_transcript_or_404(transcript_id, user, db)
+    if transcript.status == TranscriptStatus.completed or not transcript.wav_storage_path:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No WAV available")
+    if not os.path.exists(transcript.wav_storage_path):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="WAV file missing")
+    return FileResponse(
+        transcript.wav_storage_path,
+        media_type="audio/wav",
+        filename=transcript.wav_filename or "audio.wav",
+    )
+
+
 @app.post("/api/transcripts/{transcript_id}/transcribe", response_model=TranscriptionJobOut)
 def transcribe(
     transcript_id: int,

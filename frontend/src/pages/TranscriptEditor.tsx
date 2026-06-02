@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type FormEvent } from "react";
+import { useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { apiDownload, apiFetch, uploadFile } from "../api/client";
 
@@ -75,6 +75,9 @@ export default function TranscriptEditor() {
   const [newExclude, setNewExclude] = useState("");
   const [startTime, setStartTime] = useState("00:00:00");
   const [wavFile, setWavFile] = useState<File | null>(null);
+  const audioRef = useRef<HTMLAudioElement | null>(null);
+  const [audioUrl, setAudioUrl] = useState<string | null>(null);
+  const [playbackRate, setPlaybackRate] = useState(1);
   const [uploadProgress, setUploadProgress] = useState(0);
   const [job, setJob] = useState<TranscriptionJob | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
@@ -169,6 +172,42 @@ export default function TranscriptEditor() {
     return () => window.clearInterval(interval);
   }, [job?.id, job?.status, transcriptId]);
 
+  useEffect(() => {
+    if (!transcript?.wav_filename || isCompleted) {
+      setAudioUrl(null);
+      return;
+    }
+
+    let objectUrl: string | null = null;
+    let mounted = true;
+    apiDownload(`/api/transcripts/${transcriptId}/audio`)
+      .then((blob) => {
+        if (!mounted) {
+          return;
+        }
+        objectUrl = URL.createObjectURL(blob);
+        setAudioUrl(objectUrl);
+      })
+      .catch(() => {
+        if (mounted) {
+          setAudioUrl(null);
+        }
+      });
+
+    return () => {
+      mounted = false;
+      if (objectUrl) {
+        URL.revokeObjectURL(objectUrl);
+      }
+    };
+  }, [transcriptId, transcript?.wav_filename, transcript?.status, isCompleted]);
+
+  useEffect(() => {
+    if (audioRef.current) {
+      audioRef.current.playbackRate = playbackRate;
+    }
+  }, [playbackRate, audioUrl]);
+
   const runAction = async (name: string, action: () => Promise<void>) => {
     setBusy(name);
     setError(null);
@@ -216,6 +255,14 @@ export default function TranscriptEditor() {
       setJob(startedJob);
       setMessage("Transcription started");
     });
+  };
+
+  const jogAudio = (seconds: number) => {
+    if (!audioRef.current) {
+      return;
+    }
+    const nextTime = Math.max(0, Math.min(audioRef.current.duration || Number.MAX_SAFE_INTEGER, audioRef.current.currentTime + seconds));
+    audioRef.current.currentTime = nextTime;
   };
 
   const updateLineState = (lineId: number, patch: Partial<Line>) => {
@@ -442,29 +489,68 @@ export default function TranscriptEditor() {
         </div>
 
         <div className="grid gap-4 lg:grid-cols-2">
-          <form className="card space-y-3" onSubmit={uploadWav}>
-            <h3 className="text-lg font-semibold">Upload WAV</h3>
-            <p className="text-xs text-white/45">Original WAV is retained until the transcript is marked completed.</p>
-            <input
-              type="file"
-              accept=".wav,audio/wav,audio/x-wav"
-              className="block w-full text-sm text-white/70 file:mr-4 file:rounded-md file:border-0 file:bg-white/10 file:px-3 file:py-2 file:text-sm file:font-semibold file:text-white hover:file:bg-white/20"
-              onChange={(event) => setWavFile(event.target.files?.[0] || null)}
-              disabled={isCompleted}
-            />
-            <div className="flex items-center justify-between text-xs text-white/50">
-              <span className="truncate">{wavFile?.name || transcript?.wav_filename || "No file selected"}</span>
-              {busy === "upload" && <span>{uploadProgress}%</span>}
-            </div>
-            {(busy === "upload" || uploadProgress > 0) && (
-              <div className="h-2 overflow-hidden rounded-full bg-white/10">
-                <div className="h-full bg-accent transition-all" style={{ width: `${uploadProgress}%` }} />
+          <div className="space-y-4">
+            <form className="card space-y-3" onSubmit={uploadWav}>
+              <h3 className="text-lg font-semibold">Upload WAV</h3>
+              <p className="text-xs text-white/45">Original WAV is retained until the transcript is marked completed.</p>
+              <input
+                type="file"
+                accept=".wav,audio/wav,audio/x-wav"
+                className="block w-full text-sm text-white/70 file:mr-4 file:rounded-md file:border-0 file:bg-white/10 file:px-3 file:py-2 file:text-sm file:font-semibold file:text-white hover:file:bg-white/20"
+                onChange={(event) => setWavFile(event.target.files?.[0] || null)}
+                disabled={isCompleted}
+              />
+              <div className="flex items-center justify-between text-xs text-white/50">
+                <span className="truncate">{wavFile?.name || transcript?.wav_filename || "No file selected"}</span>
+                {busy === "upload" && <span>{uploadProgress}%</span>}
               </div>
-            )}
-            <button className="btn btn-secondary w-full" disabled={!wavFile || busy === "upload" || isCompleted}>
-              {busy === "upload" ? "Uploading" : "Upload WAV"}
-            </button>
-          </form>
+              {(busy === "upload" || uploadProgress > 0) && (
+                <div className="h-2 overflow-hidden rounded-full bg-white/10">
+                  <div className="h-full bg-accent transition-all" style={{ width: `${uploadProgress}%` }} />
+                </div>
+              )}
+              <button className="btn btn-secondary w-full" disabled={!wavFile || busy === "upload" || isCompleted}>
+                {busy === "upload" ? "Uploading" : "Upload WAV"}
+              </button>
+            </form>
+            <div className="card space-y-3">
+              <div className="flex items-center justify-between gap-3">
+                <div>
+                  <h3 className="text-lg font-semibold">WAV Playback</h3>
+                  <p className="text-xs text-white/45">Review audio while correcting transcript lines.</p>
+                </div>
+                <select className="select w-28" value={playbackRate} onChange={(event) => setPlaybackRate(Number(event.target.value))} disabled={!audioUrl}>
+                  <option value={0.5}>0.5x</option>
+                  <option value={0.75}>0.75x</option>
+                  <option value={1}>1x</option>
+                  <option value={1.25}>1.25x</option>
+                </select>
+              </div>
+              {audioUrl ? (
+                <>
+                  <audio ref={audioRef} src={audioUrl} controls className="w-full" />
+                  <div className="grid grid-cols-4 gap-2">
+                    <button type="button" className="btn btn-secondary" onClick={() => jogAudio(-10)}>
+                      -10s
+                    </button>
+                    <button type="button" className="btn btn-secondary" onClick={() => jogAudio(-5)}>
+                      -5s
+                    </button>
+                    <button type="button" className="btn btn-secondary" onClick={() => jogAudio(5)}>
+                      +5s
+                    </button>
+                    <button type="button" className="btn btn-secondary" onClick={() => jogAudio(10)}>
+                      +10s
+                    </button>
+                  </div>
+                </>
+              ) : (
+                <p className="rounded-md border border-white/10 bg-white/[0.03] px-3 py-3 text-sm text-white/50">
+                  Upload a WAV to enable playback. Completed transcripts have no retained audio.
+                </p>
+              )}
+            </div>
+          </div>
           <form className="card space-y-3" onSubmit={transcribe}>
             <h3 className="text-lg font-semibold">Transcribe</h3>
             <div className="rounded-md border border-white/10 bg-black/20 px-3 py-2 text-xs text-white/55">

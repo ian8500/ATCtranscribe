@@ -9,6 +9,7 @@ from app.transcription import (
     redact_excludes,
     seconds_to_hms,
     segment_to_lines,
+    should_drop_segment,
 )
 
 
@@ -30,7 +31,7 @@ def test_redaction_is_case_insensitive():
 
 def test_atc_prompt_includes_defaults_and_vocabulary():
     prompt = build_initial_prompt(["Speedbird 123", "DAGGA"])
-    assert "ATC radio transcript" in prompt
+    assert "Do not invent" in prompt
     assert "runway" in prompt
     assert "Speedbird 123" in prompt
     assert "DAGGA" in prompt
@@ -53,3 +54,30 @@ def test_low_confidence_keeps_text_and_flags_metadata():
     assert lines[0]["flags_json"]["low_confidence"] is True
     assert lines[0]["flags_json"]["avg_logprob"] == -1.4
     assert lines[0]["flags_json"]["no_speech_prob"] == 0.2
+
+
+def test_common_silence_hallucination_is_dropped():
+    segment = SimpleNamespace(
+        start=0,
+        text="Thank you for watching",
+        no_speech_prob=0.1,
+        avg_logprob=-0.2,
+        compression_ratio=1.0,
+        words=[],
+    )
+
+    assert should_drop_segment(segment) is True
+    assert segment_to_lines(segment, hms_to_seconds("09:00:00"), []) == []
+
+
+def test_probable_silence_segment_is_dropped():
+    segment = SimpleNamespace(
+        start=0,
+        text="cleared to land",
+        no_speech_prob=0.8,
+        avg_logprob=-0.4,
+        compression_ratio=1.0,
+        words=[],
+    )
+
+    assert should_drop_segment(segment) is True

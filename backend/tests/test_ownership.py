@@ -22,6 +22,7 @@ def test_non_admin_cannot_access_other_users_transcript(client):
 
     assert client.get(f"/api/transcripts/{transcript_id}").status_code == 403
     assert client.get(f"/api/transcripts/{transcript_id}/lines").status_code == 403
+    assert client.get(f"/api/transcripts/{transcript_id}/audio").status_code == 403
     assert client.post(f"/api/transcripts/{transcript_id}/export").status_code == 403
     assert client.delete(f"/api/transcripts/{transcript_id}").status_code == 403
 

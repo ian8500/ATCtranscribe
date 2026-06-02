@@ -125,10 +125,12 @@ Copy `.env.example` and set deployment-specific values. Key backend variables:
 - `CORS_ORIGINS` comma-separated allowed frontend origins.
 - `UPLOAD_DIR` default `./uploads`.
 - `MAX_UPLOAD_MB` default `200`.
-- `WHISPER_MODEL` default `small`; use `medium` for better accuracy or `base` for speed.
+- `WHISPER_MODEL` local accuracy preset `medium`; use `small` for speed or `large-v3` for maximum accuracy.
 - `WHISPER_DEVICE` default `cpu`.
 - `WHISPER_COMPUTE_TYPE` default `int8`.
 - `WHISPER_LOCAL_ONLY` set `true` after model files are cached for offline-only use.
+- `WHISPER_TEMPERATURE=0`, `WHISPER_HOTWORDS_ENABLED=false`, and the stricter no-speech/log-prob thresholds reduce ATC hallucinations.
+- `WHISPER_FFMPEG_DENOISE=false` keeps denoise off by default; enable only if it improves your radio recordings.
 - `DEV_EMAIL_CONSOLE` default `true`; set SMTP values for email delivery.
 - `RATE_LIMIT_WINDOW_SECONDS` and `RATE_LIMIT_MAX_ATTEMPTS` configure the local in-memory limiter.
 
@@ -200,11 +202,19 @@ Without `ffmpeg`, uploaded WAV files are sent to Whisper without the mono/16kHz 
 
 The first transcription may download the configured Whisper model. This can take time and needs network access.
 
-Speed-oriented local default:
+Speed-oriented local setting:
 
 ```bash
 WHISPER_MODEL=small WHISPER_DEVICE=cpu WHISPER_COMPUTE_TYPE=int8 ./scripts/run_backend.sh
 ```
+
+Accuracy-oriented local setting:
+
+```bash
+WHISPER_MODEL=medium WHISPER_DEVICE=cpu WHISPER_COMPUTE_TYPE=int8 ./scripts/run_backend.sh
+```
+
+Anti-hallucination mode is the default. It uses deterministic decoding, stricter silence filtering, and leaves uncertain spoken text flagged rather than inventing lines.
 
 After the model is cached, offline mode can be enabled in `.env`:
 

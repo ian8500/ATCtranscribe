@@ -20,11 +20,23 @@ from .settings import get_settings
 logger = logging.getLogger("atc.transcription")
 settings = get_settings()
 
-NO_SPEECH_THRESHOLD = 0.6
-AVG_LOGPROB_THRESHOLD = -1.0
-EXTREME_AVG_LOGPROB_THRESHOLD = -2.2
-COMPRESSION_RATIO_THRESHOLD = 2.6
+NO_SPEECH_THRESHOLD = settings.whisper_no_speech_threshold
+AVG_LOGPROB_THRESHOLD = settings.whisper_log_prob_threshold
+EXTREME_AVG_LOGPROB_THRESHOLD = -1.8
+COMPRESSION_RATIO_THRESHOLD = settings.whisper_compression_ratio_threshold
 MAX_LINE_CHARS = 220
+HALLUCINATION_PHRASES = {
+    "thank you",
+    "thanks for watching",
+    "thank you for watching",
+    "you",
+    "music",
+    "[music]",
+    "(music)",
+    "applause",
+    "[applause]",
+    "silence",
+}
 
 COMMON_ATC_TERMS = [
     "affirm",
@@ -79,12 +91,11 @@ LOCAL_ATC_VOCABULARY = [
 ]
 
 DEFAULT_ATC_PROMPT = (
-    "This is an aviation ATC radio transcript with short controller and pilot exchanges. "
-    "Prefer ICAO-style wording, runway numbers, headings, flight levels, frequencies, "
-    "squawk codes, readbacks, callsigns, aircraft registrations, and airport vehicles. "
-    "Examples: Speedbird 123, EZY45AB, runway two seven left, heading zero niner zero, "
-    "flight level one eight zero, contact tower one one eight decimal seven, hold short, "
-    "line up and wait, cleared for takeoff, cleared to land."
+    "This is aviation ATC radio audio. Transcribe only words that are actually spoken. "
+    "Do not invent missing callsigns, readbacks, clearances, or words during silence. "
+    "Keep uncertain ATC words as heard for later human correction. Expected vocabulary includes "
+    "callsigns, runway numbers, headings, flight levels, squawk codes, QNH, frequencies, taxiways, "
+    "vehicles, controllers, pilots, and short readbacks."
 )
 
 _model_lock = threading.Lock()
@@ -191,10 +202,11 @@ def preprocess_audio(wav_path: str, transcript_id: int) -> str:
         "1",
         "-ar",
         "16000",
-        "-af",
-        "highpass=f=280,lowpass=f=3800,afftdn=nf=-25",
-        output_path,
     ]
+    filters = ["highpass=f=300", "lowpass=f=3400"]
+    if settings.whisper_ffmpeg_denoise:
+        filters.append("afftdn=nf=-25")
+    command.extend(["-af", ",".join(filters), output_path])
     try:
         subprocess.run(command, check=True, capture_output=True, text=True, timeout=300)
     except Exception as exc:
@@ -227,7 +239,44 @@ def _metadata_flags(seg: Any) -> dict[str, Any]:
         or (compression_ratio is not None and compression_ratio > COMPRESSION_RATIO_THRESHOLD)
     ):
         flags["low_confidence"] = True
+    if no_speech_prob is not None and no_speech_prob > NO_SPEECH_THRESHOLD:
+        flags["possible_silence"] = True
     return flags
+
+
+def _normalized_text(text: str) -> str:
+    return re.sub(r"[^a-z0-9]+", " ", text.lower()).strip()
+
+
+def _is_repetitive_hallucination(text: str) -> bool:
+    words = _normalized_text(text).split()
+    if len(words) < 6:
+        return False
+    unique_ratio = len(set(words)) / len(words)
+    return unique_ratio < 0.35
+
+
+def should_drop_segment(seg: Any) -> bool:
+    raw_text = (getattr(seg, "text", "") or "").strip()
+    normalized = _normalized_text(raw_text)
+    no_speech_prob = getattr(seg, "no_speech_prob", None)
+    avg_logprob = getattr(seg, "avg_logprob", None)
+    compression_ratio = getattr(seg, "compression_ratio", None)
+
+    if not raw_text:
+        return True
+    if normalized in HALLUCINATION_PHRASES:
+        return True
+    if _is_repetitive_hallucination(raw_text):
+        return True
+    if no_speech_prob is not None and no_speech_prob >= NO_SPEECH_THRESHOLD:
+        if avg_logprob is None or avg_logprob < -0.25:
+            return True
+    if avg_logprob is not None and avg_logprob < EXTREME_AVG_LOGPROB_THRESHOLD:
+        return True
+    if compression_ratio is not None and compression_ratio > COMPRESSION_RATIO_THRESHOLD + 0.4:
+        return True
+    return False
 
 
 def _word_flags(seg: Any, offset_seconds: int) -> dict[str, list[dict[str, Any]]]:
@@ -282,23 +331,11 @@ def _split_text(text: str, max_chars: int = MAX_LINE_CHARS) -> list[str]:
 
 
 def segment_to_lines(seg: Any, start_seconds: int, exclude_list: list[str]) -> list[dict]:
-    no_speech_prob = getattr(seg, "no_speech_prob", None)
-    avg_logprob = getattr(seg, "avg_logprob", None)
-    if (
-        no_speech_prob is not None
-        and no_speech_prob > NO_SPEECH_THRESHOLD
-        and (avg_logprob is None or avg_logprob < AVG_LOGPROB_THRESHOLD)
-    ):
+    if should_drop_segment(seg):
         return []
 
     raw_text = (getattr(seg, "text", "") or "").strip()
     flags = _metadata_flags(seg)
-    if avg_logprob is not None and avg_logprob < EXTREME_AVG_LOGPROB_THRESHOLD and not raw_text:
-        raw_text = "[unclear]"
-        flags["low_confidence"] = True
-    elif not raw_text:
-        raw_text = "[unclear]"
-        flags["low_confidence"] = True
 
     redacted_text, redacted = redact_excludes(raw_text, exclude_list)
     if redacted:
@@ -321,22 +358,32 @@ def transcribe_audio(wav_path: str, start_time: str, exclude_list: list[str], vo
 
     try:
         initial_prompt = build_initial_prompt(vocabulary)
-        hotwords = " ".join([*COMMON_ATC_TERMS, *LOCAL_ATC_VOCABULARY, *vocabulary[:80]])
+        hotwords = None
+        if settings.whisper_hotwords_enabled:
+            hotwords = " ".join([*COMMON_ATC_TERMS, *LOCAL_ATC_VOCABULARY, *vocabulary[:80]])
         started = time.perf_counter()
         segments, _ = model.transcribe(
             preprocessing_path,
             language="en",
-            temperature=(0.0, 0.2),
-            beam_size=5,
+            temperature=settings.whisper_temperature,
+            beam_size=settings.whisper_beam_size,
+            best_of=settings.whisper_beam_size,
+            repetition_penalty=settings.whisper_repetition_penalty,
+            no_repeat_ngram_size=settings.whisper_no_repeat_ngram_size,
             vad_filter=True,
-            vad_parameters={"min_silence_duration_ms": 350, "speech_pad_ms": 250},
+            vad_parameters={
+                "min_silence_duration_ms": settings.whisper_vad_min_silence_ms,
+                "speech_pad_ms": settings.whisper_vad_speech_pad_ms,
+            },
             condition_on_previous_text=False,
+            suppress_blank=True,
             initial_prompt=initial_prompt,
             hotwords=hotwords,
             word_timestamps=True,
             no_speech_threshold=NO_SPEECH_THRESHOLD,
             log_prob_threshold=AVG_LOGPROB_THRESHOLD,
             compression_ratio_threshold=COMPRESSION_RATIO_THRESHOLD,
+            hallucination_silence_threshold=settings.whisper_hallucination_silence_threshold,
         )
         results: list[dict] = []
         for seg in segments:
@@ -345,6 +392,4 @@ def transcribe_audio(wav_path: str, start_time: str, exclude_list: list[str], vo
     finally:
         cleanup_preprocessed_audio(preprocessing_path, wav_path)
 
-    if not results:
-        results.append({"timestamp_hms": start_time, "text": "[unclear]", "flags_json": {"low_confidence": True}})
     return results
