@@ -1,0 +1,85 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+REPO_ROOT="/Users/iandickson/Desktop/ATCtranscribe"
+BACKEND_PORT="${ATC_BACKEND_PORT:-8765}"
+FRONTEND_PORT="${ATC_FRONTEND_PORT:-8766}"
+BACKEND_URL="http://127.0.0.1:${BACKEND_PORT}"
+FRONTEND_URL="http://127.0.0.1:${FRONTEND_PORT}"
+LOG_DIR="/tmp/ATCtranscribe"
+mkdir -p "$LOG_DIR"
+
+notify() {
+  /usr/bin/osascript -e "display notification \"$1\" with title \"ATC Investigation Desk\"" >/dev/null 2>&1 || true
+}
+
+alert() {
+  /usr/bin/osascript -e "display alert \"ATC Investigation Desk\" message \"$1\"" >/dev/null 2>&1 || true
+}
+
+wait_for_url() {
+  local url="$1"
+  local attempts="${2:-60}"
+  local i=0
+  until /usr/bin/curl -fsS "$url" >/dev/null 2>&1; do
+    i=$((i + 1))
+    if [ "$i" -ge "$attempts" ]; then
+      return 1
+    fi
+    sleep 1
+  done
+}
+
+if ! command -v python3 >/dev/null 2>&1; then
+  alert "Python 3 is required. Install Python 3, then open the app again."
+  exit 1
+fi
+
+if ! command -v npm >/dev/null 2>&1; then
+  alert "Node.js and npm are required. Install Node.js, then open the app again."
+  exit 1
+fi
+
+cd "$REPO_ROOT/backend"
+if [ ! -x ".venv/bin/python" ]; then
+  notify "Preparing backend environment"
+  python3 -m venv .venv >> "$LOG_DIR/setup.log" 2>&1
+  .venv/bin/pip install -r requirements.txt >> "$LOG_DIR/setup.log" 2>&1
+fi
+
+.venv/bin/alembic upgrade head >> "$LOG_DIR/backend.log" 2>&1
+
+if ! /usr/bin/curl -fsS "$BACKEND_URL/api/health" >/dev/null 2>&1; then
+  notify "Starting backend service"
+  APP_ENV=development \
+  SECRET_KEY="${ATC_SECRET_KEY:-desktop-local-secret-change-before-real-recordings-32chars}" \
+  CORS_ORIGINS="$FRONTEND_URL,http://localhost:$FRONTEND_PORT" \
+  UPLOAD_DIR="$REPO_ROOT/backend/uploads" \
+  "$REPO_ROOT/backend/.venv/bin/uvicorn" app.main:app --host 127.0.0.1 --port "$BACKEND_PORT" \
+    >> "$LOG_DIR/backend.log" 2>&1 &
+fi
+
+if ! wait_for_url "$BACKEND_URL/api/health" 90; then
+  alert "Backend did not start. Check $LOG_DIR/backend.log"
+  exit 1
+fi
+
+cd "$REPO_ROOT/frontend"
+if [ ! -d "node_modules" ]; then
+  notify "Preparing frontend environment"
+  npm install >> "$LOG_DIR/setup.log" 2>&1
+fi
+
+if ! /usr/bin/curl -fsS "$FRONTEND_URL" >/dev/null 2>&1; then
+  notify "Starting workspace"
+  VITE_API_BASE="$BACKEND_URL" npm run dev -- --host 127.0.0.1 --port "$FRONTEND_PORT" \
+    >> "$LOG_DIR/frontend.log" 2>&1 &
+fi
+
+if ! wait_for_url "$FRONTEND_URL" 90; then
+  alert "Frontend did not start. Check $LOG_DIR/frontend.log"
+  exit 1
+fi
+
+open "$FRONTEND_URL"
+notify "Workspace ready"

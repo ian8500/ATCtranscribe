@@ -1,6 +1,7 @@
-from pydantic import BaseModel, Field, EmailStr
-from typing import List, Optional
-from .models import TranscriptStatus, AccessLevel
+from pydantic import BaseModel, ConfigDict, Field, EmailStr
+from datetime import datetime
+from typing import Optional
+from .models import TranscriptStatus, AccessLevel, TranscriptionJobStatus
 
 
 class UserListItem(BaseModel):
@@ -23,14 +24,13 @@ class UserUpdate(BaseModel):
 
 
 class UserOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
     id: int
     name: str
     email: EmailStr
     access_level: AccessLevel
     active: bool
-
-    class Config:
-        from_attributes = True
 
 
 class LoginRequest(BaseModel):
@@ -44,16 +44,15 @@ class TranscriptCreate(BaseModel):
 
 
 class TranscriptOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
     id: int
     name: str
     description: Optional[str]
     owner_user_id: int
     status: TranscriptStatus
     wav_filename: Optional[str]
-    created_at: str
-
-    class Config:
-        from_attributes = True
+    created_at: datetime
 
 
 class TranscriptUpdate(BaseModel):
@@ -63,15 +62,14 @@ class TranscriptUpdate(BaseModel):
 
 
 class TranscriptLineOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
     id: int
     order_index: int
     timestamp_hms: str
     speaker_label_id: Optional[int]
     text: str
     flags_json: Optional[dict]
-
-    class Config:
-        from_attributes = True
 
 
 class TranscriptLineCreate(BaseModel):
@@ -90,12 +88,11 @@ class TranscriptLineUpdate(BaseModel):
 
 
 class SpeakerLabelOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
     id: int
     name: str
     color_hex: str
-
-    class Config:
-        from_attributes = True
 
 
 class SpeakerLabelCreate(BaseModel):
@@ -109,11 +106,10 @@ class SpeakerLabelUpdate(BaseModel):
 
 
 class EntryOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
     id: int
     word_or_phrase: str
-
-    class Config:
-        from_attributes = True
 
 
 class EntryCreate(BaseModel):
@@ -122,6 +118,20 @@ class EntryCreate(BaseModel):
 
 class StartTranscriptionRequest(BaseModel):
     start_time: str = Field(pattern=r"^\d{2}:\d{2}:\d{2}$")
+
+
+class TranscriptionJobOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    transcript_id: int
+    status: TranscriptionJobStatus
+    progress: int
+    error: Optional[str]
+    created_at: datetime
+    updated_at: datetime
+    started_at: Optional[datetime]
+    completed_at: Optional[datetime]
 
 
 class SplitLineRequest(BaseModel):
@@ -148,12 +158,11 @@ class ResetPasswordRequest(BaseModel):
 
 
 class AuditLogOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
     id: int
     action: str
     target_type: Optional[str]
     target_id: Optional[int]
-    created_at: str
+    created_at: datetime
     metadata_json: Optional[dict]
-
-    class Config:
-        from_attributes = True

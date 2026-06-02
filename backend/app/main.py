@@ -1,36 +1,47 @@
-from fastapi import FastAPI, Depends, HTTPException, status, UploadFile, File, Response, Request
+from datetime import datetime
+import logging
+import os
+import tempfile
+import time
+
+from fastapi import FastAPI, Depends, HTTPException, status, UploadFile, File, Response, Request, BackgroundTasks
+from fastapi.responses import FileResponse
 from fastapi.middleware.cors import CORSMiddleware
+from starlette.background import BackgroundTask
 from sqlalchemy.orm import Session
 from sqlalchemy import select
-from .db import get_db, engine
-from .models import User, Transcript, TranscriptLine, SpeakerLabel, TranscriptStatus, AccessLevel, ExcludeEntry, VocabularyEntry
+from .db import get_db, ensure_database_ready
+from .models import (
+    User, Transcript, TranscriptLine, SpeakerLabel, TranscriptStatus, AccessLevel,
+    ExcludeEntry, VocabularyEntry, TranscriptionJob, TranscriptionJobStatus,
+)
 from .schemas import (
     UserListItem, LoginRequest, TranscriptCreate, TranscriptOut, TranscriptUpdate,
     TranscriptLineOut, TranscriptLineCreate, TranscriptLineUpdate, StartTranscriptionRequest,
     SplitLineRequest, MergeLinesRequest, SpeakerLabelCreate, SpeakerLabelOut, SpeakerLabelUpdate,
-    ExportResponse, ForgotPasswordRequest, UserCreate, UserOut, UserUpdate, ResetPasswordRequest, AuditLogOut,
-    EntryCreate, EntryOut,
+    ForgotPasswordRequest, UserCreate, UserOut, UserUpdate, ResetPasswordRequest, AuditLogOut,
+    EntryCreate, EntryOut, TranscriptionJobOut,
 )
 from .security import verify_password, create_access_token, hash_password
 from .deps import get_current_user, require_admin
 from .settings import get_settings
-from .audio import save_wav_file, purge_transcript_audio
+from .audio import save_wav_file, purge_transcript_audio, sanitize_filename
 from .transcription import transcribe_audio, hms_to_seconds
 from .emailer import send_email
 from .audit import log_event
 from .rate_limit import rate_limiter
 from .models import AuditLog
-import os
 from docx import Document
 
 
 settings = get_settings()
+logger = logging.getLogger("atc.api")
 
 app = FastAPI(title="ATC Transcriber")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173"],
+    allow_origins=settings.allowed_cors_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"]
@@ -39,6 +50,8 @@ app.add_middleware(
 
 @app.on_event("startup")
 def sweep_completed_audio() -> None:
+    settings.validate_security()
+    ensure_database_ready()
     from .db import SessionLocal
     db = SessionLocal()
     try:
@@ -52,6 +65,11 @@ def sweep_completed_audio() -> None:
         db.commit()
     finally:
         db.close()
+
+
+@app.get("/api/health")
+def health():
+    return {"status": "ok", "app": "ATC Transcriber"}
 
 
 @app.get("/api/auth/user-list", response_model=list[UserListItem])
@@ -77,14 +95,16 @@ def login(payload: LoginRequest, response: Response, request: Request, db: Sessi
         httponly=True,
         secure=settings.secure_cookies,
         samesite="strict",
+        max_age=settings.access_token_expire_minutes * 60,
     )
     log_event(db, user.id, "login_success", "user", user.id)
     return {"message": "ok"}
 
 
 @app.post("/api/auth/logout")
-def logout(response: Response, user: User = Depends(get_current_user)):
-    response.delete_cookie(settings.session_cookie_name)
+def logout(response: Response, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    response.delete_cookie(settings.session_cookie_name, secure=settings.secure_cookies, samesite="strict")
+    log_event(db, user.id, "logout", "user", user.id)
     return {"message": "logged out"}
 
 
@@ -187,6 +207,124 @@ def reorder_lines(transcript_id: int, db: Session) -> None:
     db.commit()
 
 
+def validate_speaker_label(transcript_id: int, label_id: int | None, db: Session) -> None:
+    if label_id is None:
+        return
+    label = db.get(SpeakerLabel, label_id)
+    if not label or label.transcript_id != transcript_id:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Speaker label does not belong to this transcript")
+
+
+def latest_transcription_job(transcript_id: int, db: Session) -> TranscriptionJob | None:
+    return db.execute(
+        select(TranscriptionJob)
+        .where(TranscriptionJob.transcript_id == transcript_id)
+        .order_by(TranscriptionJob.created_at.desc(), TranscriptionJob.id.desc())
+        .limit(1)
+    ).scalar_one_or_none()
+
+
+def active_transcription_job(transcript_id: int, db: Session) -> TranscriptionJob | None:
+    return db.execute(
+        select(TranscriptionJob)
+        .where(
+            TranscriptionJob.transcript_id == transcript_id,
+            TranscriptionJob.status.in_([TranscriptionJobStatus.queued, TranscriptionJobStatus.running]),
+        )
+        .order_by(TranscriptionJob.created_at.desc(), TranscriptionJob.id.desc())
+        .limit(1)
+    ).scalar_one_or_none()
+
+
+def update_job_status(
+    db: Session,
+    job: TranscriptionJob,
+    *,
+    status_value: TranscriptionJobStatus | None = None,
+    progress: int | None = None,
+    error: str | None = None,
+) -> None:
+    if status_value is not None:
+        job.status = status_value
+    if progress is not None:
+        job.progress = progress
+    if error is not None:
+        job.error = error
+    job.updated_at = datetime.utcnow()
+    db.commit()
+
+
+def run_transcription_job(job_id: int, start_time: str, actor_user_id: int | None = None) -> None:
+    from .db import SessionLocal
+
+    db = SessionLocal()
+    total_started = time.perf_counter()
+    try:
+        job = db.get(TranscriptionJob, job_id)
+        if not job:
+            logger.warning("Transcription job %s was not found", job_id)
+            return
+        job.status = TranscriptionJobStatus.running
+        job.progress = 5
+        job.started_at = datetime.utcnow()
+        job.updated_at = datetime.utcnow()
+        db.commit()
+
+        transcript = db.get(Transcript, job.transcript_id)
+        if not transcript:
+            raise RuntimeError("Transcript not found")
+        if not transcript.wav_storage_path or not os.path.exists(transcript.wav_storage_path):
+            raise RuntimeError("No WAV uploaded")
+
+        hms_to_seconds(start_time)
+        exclude_entries = db.execute(select(ExcludeEntry).where(ExcludeEntry.transcript_id == transcript.id)).scalars().all()
+        vocab_entries = db.execute(select(VocabularyEntry).where(VocabularyEntry.transcript_id == transcript.id)).scalars().all()
+        exclude_list = [entry.word_or_phrase for entry in exclude_entries]
+        vocab_list = [entry.word_or_phrase for entry in vocab_entries]
+        transcript.exclude_snapshot = {"entries": exclude_list}
+        transcript.dictionary_snapshot = {"entries": vocab_list}
+        update_job_status(db, job, progress=15)
+
+        lines = transcribe_audio(transcript.wav_storage_path, start_time, exclude_list, vocab_list, transcript.id)
+        update_job_status(db, job, progress=85)
+
+        write_started = time.perf_counter()
+        db.query(TranscriptLine).filter(TranscriptLine.transcript_id == transcript.id).delete()
+        for index, line in enumerate(lines):
+            db.add(
+                TranscriptLine(
+                    transcript_id=transcript.id,
+                    order_index=index,
+                    timestamp_hms=line["timestamp_hms"],
+                    text=line["text"],
+                    flags_json=line.get("flags_json"),
+                )
+            )
+        transcript.status = TranscriptStatus.in_progress
+        job.status = TranscriptionJobStatus.completed
+        job.progress = 100
+        job.completed_at = datetime.utcnow()
+        job.updated_at = datetime.utcnow()
+        db.commit()
+        logger.info("Transcription database write completed in %.2fs", time.perf_counter() - write_started)
+        log_event(db, actor_user_id, "transcription_completed", "transcript", transcript.id, {"job_id": job.id})
+        logger.info("Transcription job %s completed in %.2fs", job.id, time.perf_counter() - total_started)
+    except Exception as exc:
+        db.rollback()
+        job = db.get(TranscriptionJob, job_id)
+        if job:
+            job.status = TranscriptionJobStatus.failed
+            job.progress = 100
+            job.error = str(exc)
+            job.completed_at = datetime.utcnow()
+            job.updated_at = datetime.utcnow()
+            db.commit()
+            log_event(db, actor_user_id, "transcription_failed", "transcript", job.transcript_id, {"job_id": job.id})
+        logger.exception("Transcription job %s failed", job_id)
+    finally:
+        db.close()
+
+
 @app.get("/api/transcripts", response_model=list[TranscriptOut])
 def list_transcripts(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     if user.access_level == AccessLevel.admin:
@@ -236,6 +374,7 @@ def update_transcript(transcript_id: int, payload: TranscriptUpdate, user: User 
 def delete_transcript(transcript_id: int, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     transcript = get_transcript_or_404(transcript_id, user, db)
     purge_transcript_audio(transcript.id)
+    log_event(db, user.id, "audio_purged_for_delete", "transcript", transcript.id)
     db.delete(transcript)
     db.commit()
     log_event(db, user.id, "transcript_deleted", "transcript", transcript_id)
@@ -248,41 +387,48 @@ def upload_wav(transcript_id: int, file: UploadFile = File(...), user: User = De
     if transcript.status == TranscriptStatus.completed:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Transcript completed")
     path = save_wav_file(transcript.id, file)
-    transcript.wav_filename = file.filename
+    transcript.wav_filename = sanitize_filename(file.filename)
     transcript.wav_storage_path = path
     db.commit()
     log_event(db, user.id, "wav_uploaded", "transcript", transcript.id)
     return {"message": "uploaded"}
 
 
-@app.post("/api/transcripts/{transcript_id}/transcribe")
-def transcribe(transcript_id: int, payload: StartTranscriptionRequest, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+@app.post("/api/transcripts/{transcript_id}/transcribe", response_model=TranscriptionJobOut)
+def transcribe(
+    transcript_id: int,
+    payload: StartTranscriptionRequest,
+    background_tasks: BackgroundTasks,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
     transcript = get_transcript_or_404(transcript_id, user, db)
     if transcript.status == TranscriptStatus.completed:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Transcript completed")
     if not transcript.wav_storage_path:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="No WAV uploaded")
     hms_to_seconds(payload.start_time)
-    exclude_entries = db.execute(select(ExcludeEntry).where(ExcludeEntry.transcript_id == transcript.id)).scalars().all()
-    vocab_entries = db.execute(select(VocabularyEntry).where(VocabularyEntry.transcript_id == transcript.id)).scalars().all()
-    exclude_list = [entry.word_or_phrase for entry in exclude_entries]
-    vocab_list = [entry.word_or_phrase for entry in vocab_entries]
-    lines = transcribe_audio(transcript.wav_storage_path, payload.start_time, exclude_list, vocab_list)
-    db.query(TranscriptLine).filter(TranscriptLine.transcript_id == transcript.id).delete()
-    for index, line in enumerate(lines):
-        db.add(
-            TranscriptLine(
-                transcript_id=transcript.id,
-                order_index=index,
-                timestamp_hms=line["timestamp_hms"],
-                text=line["text"],
-                flags_json=line.get("flags_json"),
-            )
-        )
-    transcript.status = TranscriptStatus.in_progress
+
+    existing_job = active_transcription_job(transcript.id, db)
+    if existing_job:
+        return existing_job
+
+    job = TranscriptionJob(transcript_id=transcript.id, status=TranscriptionJobStatus.queued, progress=0)
+    db.add(job)
     db.commit()
-    log_event(db, user.id, "transcription_completed", "transcript", transcript.id)
-    return {"message": "transcribed"}
+    db.refresh(job)
+    log_event(db, user.id, "transcription_started", "transcript", transcript.id, {"job_id": job.id})
+    background_tasks.add_task(run_transcription_job, job.id, payload.start_time, user.id)
+    return job
+
+
+@app.get("/api/transcripts/{transcript_id}/transcription-job", response_model=TranscriptionJobOut)
+def get_transcription_job(transcript_id: int, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    transcript = get_transcript_or_404(transcript_id, user, db)
+    job = latest_transcription_job(transcript.id, db)
+    if not job:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No transcription job found")
+    return job
 
 
 @app.get("/api/transcripts/{transcript_id}/lines", response_model=list[TranscriptLineOut])
@@ -295,6 +441,7 @@ def list_lines(transcript_id: int, user: User = Depends(get_current_user), db: S
 @app.post("/api/transcripts/{transcript_id}/lines", response_model=TranscriptLineOut)
 def add_line(transcript_id: int, payload: TranscriptLineCreate, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     transcript = get_transcript_or_404(transcript_id, user, db)
+    validate_speaker_label(transcript.id, payload.speaker_label_id, db)
     line = TranscriptLine(
         transcript_id=transcript.id,
         order_index=payload.order_index,
@@ -316,6 +463,8 @@ def update_line(transcript_id: int, line_id: int, payload: TranscriptLineUpdate,
     if not line or line.transcript_id != transcript.id:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Line not found")
     data = payload.dict(exclude_unset=True)
+    if "speaker_label_id" in data:
+        validate_speaker_label(transcript.id, data["speaker_label_id"], db)
     for key, value in data.items():
         setattr(line, key, value)
     db.commit()
@@ -464,7 +613,7 @@ def delete_exclude(transcript_id: int, entry_id: int, user: User = Depends(get_c
     return {"message": "deleted"}
 
 
-@app.post("/api/transcripts/{transcript_id}/export", response_model=ExportResponse)
+@app.post("/api/transcripts/{transcript_id}/export")
 def export_transcript(transcript_id: int, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     transcript = get_transcript_or_404(transcript_id, user, db)
     lines = db.execute(select(TranscriptLine).where(TranscriptLine.transcript_id == transcript.id).order_by(TranscriptLine.order_index)).scalars().all()
@@ -480,18 +629,17 @@ def export_transcript(transcript_id: int, user: User = Depends(get_current_user)
             if label_obj:
                 label = label_obj.name
         doc.add_paragraph(f"[{line.timestamp_hms}] {label}: {line.text}")
-    export_path = os.path.join("/tmp", f"transcript_{transcript.id}.docx")
+    with tempfile.NamedTemporaryFile(prefix=f"atc_transcript_{transcript.id}_", suffix=".docx", delete=False) as export_file:
+        export_path = export_file.name
     doc.save(export_path)
-    send_email(
-        f"Transcript export: {transcript.name}",
-        "Your transcript export is attached.",
-        [user.email],
-        attachment_path=export_path,
-    )
-    if os.path.exists(export_path):
-        os.remove(export_path)
     log_event(db, user.id, "transcript_exported", "transcript", transcript.id)
-    return ExportResponse(message="exported")
+    filename = f"{sanitize_filename(transcript.name).removesuffix('.wav')}_{transcript.id}.docx"
+    return FileResponse(
+        export_path,
+        media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        filename=filename,
+        background=BackgroundTask(lambda: os.path.exists(export_path) and os.remove(export_path)),
+    )
 
 
 @app.post("/api/transcripts/{transcript_id}/mark-complete")
@@ -500,6 +648,7 @@ def mark_complete(transcript_id: int, user: User = Depends(get_current_user), db
     if transcript.status == TranscriptStatus.completed:
         return {"message": "already completed"}
     purge_transcript_audio(transcript.id)
+    log_event(db, user.id, "audio_purged_on_complete", "transcript", transcript.id)
     transcript.status = TranscriptStatus.completed
     transcript.wav_storage_path = None
     transcript.wav_filename = None

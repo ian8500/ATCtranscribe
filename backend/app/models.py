@@ -15,6 +15,13 @@ class TranscriptStatus(str, enum.Enum):
     completed = "Completed"
 
 
+class TranscriptionJobStatus(str, enum.Enum):
+    queued = "queued"
+    running = "running"
+    completed = "completed"
+    failed = "failed"
+
+
 class User(Base):
     __tablename__ = "users"
 
@@ -48,6 +55,27 @@ class Transcript(Base):
     owner = relationship("User", back_populates="transcripts")
     lines = relationship("TranscriptLine", cascade="all, delete-orphan", back_populates="transcript")
     labels = relationship("SpeakerLabel", cascade="all, delete-orphan", back_populates="transcript")
+    transcription_jobs = relationship("TranscriptionJob", cascade="all, delete-orphan", back_populates="transcript")
+
+
+class TranscriptionJob(Base):
+    __tablename__ = "transcription_jobs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    transcript_id: Mapped[int] = mapped_column(ForeignKey("transcripts.id"), nullable=False)
+    status: Mapped[TranscriptionJobStatus] = mapped_column(
+        Enum(TranscriptionJobStatus),
+        default=TranscriptionJobStatus.queued,
+        nullable=False,
+    )
+    progress: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    error: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[DateTime] = mapped_column(DateTime, server_default=func.now())
+    updated_at: Mapped[DateTime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
+    started_at: Mapped[DateTime | None] = mapped_column(DateTime)
+    completed_at: Mapped[DateTime | None] = mapped_column(DateTime)
+
+    transcript = relationship("Transcript", back_populates="transcription_jobs")
 
 
 class TranscriptLine(Base):
